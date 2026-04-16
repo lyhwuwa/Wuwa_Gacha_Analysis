@@ -8,23 +8,53 @@ import altair as alt # 新增：引入强大的高级图表库
 st.set_page_config(page_title="鸣潮抽卡分析站 | 可视化版", layout="wide")
 
 def fetch_kuro_data(url):
-    """抓取数据并附带时间戳"""
-    headers = {"Content-Type": "application/json"}
+    """带反爬伪装和精确错误提示的抓取函数"""
+    # 增加 User-Agent 伪装成真实的电脑浏览器，防止被服务器拦截
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     payload = {"cardPoolId": "", "cardPoolType": 1, "languageCode": "zh-Hans", "recordId": ""}
     all_pulls = []
     
+    # 基础格式校验
+    if not url.startswith("http"):
+        return None, "抓取失败: 请粘贴完整的 URL 链接（必须以 http 开头）。"
+    
     try:
         while True:
-            res = requests.post(url, json=payload, headers=headers).json()
-            if res.get("code") != 0 or not res.get("data"): break
+            response = requests.post(url, json=payload, headers=headers)
+            
+            # 1. 检查服务器是否直接拒绝访问 (比如 403, 404, 500)
+            if response.status_code != 200:
+                return None, f"抓取失败: 服务器拒绝访问 (状态码 {response.status_code})。大概率链接已过期，请回游戏重新提取。"
+            
+            # 2. 尝试解析数据，捕获你遇到的那个 JSON 报错
+            try:
+                res = response.json()
+            except ValueError:
+                return None, "抓取失败: 服务器返回了无效数据（非JSON）。链接已失效或请求被拦截，请回游戏刷新记录并重新获取 URL。"
+            
+            # 3. 检查游戏服务器自带的错误码
+            if res.get("code") != 0:
+                error_msg = res.get("message", "未知错误")
+                return None, f"抓取失败: 官方服务器提示 - {error_msg}。"
+                
+            if not res.get("data"): 
+                break # 数据抓完了
+                
             data_list = res["data"]
             all_pulls.extend(data_list)
             payload["recordId"] = data_list[-1]["id"]
             time.sleep(0.3)
+            
+    except requests.exceptions.RequestException as e:
+        return None, f"网络请求失败，请检查网络连接: {str(e)}"
     except Exception as e:
-        return None, f"抓取失败: {str(e)}"
+        return None, f"发生未知错误: {str(e)}"
         
-    if not all_pulls: return None, "未获取到数据，链接可能已过期。"
+    if not all_pulls: 
+        return None, "未获取到任何抽卡数据，请确认你在这个池子里有抽卡记录。"
         
     all_pulls.reverse()
     standard_5_stars = ["凌阳", "鉴心", "卡卡罗", "维里奈", "安可"]
