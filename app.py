@@ -4,102 +4,8 @@ import io
 import requests
 import time
 import altair as alt # 新增：引入强大的高级图表库
-import urllib.parse # 添加在文件最顶部的 import 区域
 
 st.set_page_config(page_title="鸣潮抽卡分析站 | 可视化版", layout="wide")
-
-def fetch_kuro_data(url):
-    """自动解析前端 URL 并请求库洛后端 API"""
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
-    # 1. 拦截错误输入
-    if "?" not in url:
-        return None, "抓取失败：这不是一个有效的带参数的抽卡链接。"
-        
-    # 2. 核心戏法：从你的网页 URL 中拆解出所有的身份令牌
-    try:
-        # 分离出问号后面的参数部分
-        query_string = url.split("?")[1]
-        # 将参数解析为字典
-        params_dict = urllib.parse.parse_qs(query_string)
-        # 将列表值转换为普通字典
-        payload = {k: v[0] for k, v in params_dict.items()}
-    except Exception as e:
-        return None, f"URL 解析失败: {str(e)}"
-
-    # 3. 锁定目标：强制查询 1 号池（角色限定唤取）
-    payload["cardPoolType"] = 1
-    
-    # 4. 智能路由：判断是国服还是国际服
-    # 国服 API 通常是 aki-game2.com，外服通常是 .net
-    api_endpoint = "https://gmserver-api.aki-game2.com/gacha/record/query"
-    if "global" in payload.get("serverId", "").lower() or ".net" in url:
-        api_endpoint = "https://gmserver-api.aki-game2.net/gacha/record/query"
-
-    all_pulls = []
-    
-    # 5. 开始向真正的后端接口请求数据
-    try:
-        while True:
-            response = requests.post(api_endpoint, json=payload, headers=headers)
-            
-            if response.status_code != 200:
-                return None, f"请求被官方服务器拒绝 (HTTP {response.status_code})。请确认链接未过期。"
-                
-            res = response.json()
-            
-            # 检查官方接口返回的错误码
-            if res.get("code") != 0:
-                return None, f"官方服务器提示: {res.get('message', '未知错误(大概率链接已过期)')}"
-                
-            if not res.get("data"):
-                break # 这一页没数据了，说明抓取完毕
-                
-            data_list = res["data"]
-            all_pulls.extend(data_list)
-            
-            # 把记录翻页指针更新为当前页最后一条的ID，准备抓下一页
-            payload["recordId"] = data_list[-1]["id"]
-            time.sleep(0.3) # 停顿防封
-            
-    except Exception as e:
-        return None, f"网络请求异常: {str(e)}"
-        
-    if not all_pulls:
-        return None, "未获取到数据，可能是这个池子你还没有抽过卡。"
-        
-    # 官方数据是从新到旧，为了算垫刀，反转成从旧到新
-    all_pulls.reverse()
-    standard_5_stars = ["凌阳", "鉴心", "卡卡罗", "维里奈", "安可"]
-    
-    parsed_data = []
-    pull_counter = 0
-    for pull in all_pulls:
-        pull_counter += 1
-        if pull.get("qualityLevel") == 5:
-            name = pull.get("name")
-            is_up = "否" if name in standard_5_stars else "是"
-            parsed_data.append({
-                "时间": pull.get("time", ""),
-                "角色名": name,
-                "是UP?": is_up,
-                "抽数": pull_counter
-            })
-            pull_counter = 0 
-            
-    return pd.DataFrame(parsed_data), "success"
-def merge_records(old_df, new_df):
-    if old_df.empty: return new_df
-    if new_df.empty: return old_df
-    for df in [old_df, new_df]:
-        if '时间' not in df.columns: df['时间'] = ""
-        df['时间'] = df['时间'].fillna("")
-    combined = pd.concat([old_df, new_df], ignore_index=True)
-    combined = combined.drop_duplicates(subset=['角色名', '抽数', '时间'], keep='last').reset_index(drop=True)
-    return combined
 
 def calculate_stats(df):
     df_valid = df.dropna(subset=['角色名', '抽数']).copy()
@@ -154,24 +60,7 @@ if 'raw_data' not in st.session_state:
     st.session_state.raw_data = pd.DataFrame(columns=['时间', '角色名', '是UP?', '抽数'])
 
 # --- 侧边栏 ---
-with st.sidebar:
-    st.header("🔗 第一步：增量抓取")
-    api_url = st.text_input("粘贴 URL 同步近6个月数据:")
-    if st.button("🚀 抓取并合并"):
-        if api_url:
-            with st.spinner("正在同步..."):
-                fetched_df, msg = fetch_kuro_data(api_url.strip())
-                if msg == "success":
-                    st.session_state.raw_data = merge_records(st.session_state.raw_data, fetched_df)
-                    st.success("抓取成功！已剔除重复项。")
-                    st.rerun()
-                else:
-                    st.error(msg)
-        else:
-            st.warning("请先粘贴 URL。")
-
-    st.markdown("---")
-    st.header("📁 第二步：历史导入")
+    st.header("📁 历史导入")
     uploaded_file = st.file_uploader("导入本地备份 (.xlsx/.csv)", type=["xlsx", "csv"])
     if uploaded_file is not None:
         try:
@@ -184,7 +73,7 @@ with st.sidebar:
             st.error(f"文件读取失败: {e}")
 
     st.markdown("---")
-    st.header("💾 第三步：导出备份")
+    st.header("💾 导出备份")
     if not st.session_state.raw_data.empty:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
