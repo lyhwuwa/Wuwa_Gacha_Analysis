@@ -247,30 +247,32 @@ if not edited_df.empty and not edited_df['角色名'].isna().all():
         up_df = res_df[res_df['是UP?'] == '是'].copy()
         
         if not up_df.empty:
-            # 为了防止重名角色（比如抽了多个今汐）导致图表合并，我们给角色加个序号
+            # 为了防止重名角色导致图表合并，我们给角色加个序号
             up_df['获取序号'] = range(1, len(up_df) + 1)
             up_df['展示名'] = up_df['获取序号'].astype(str) + ". " + up_df['角色名']
             
-            # 使用 Altair 构建高级颜色条件图表
+            # 【修复点】：用 Python 提前算好颜色，避开 Altair 库的嵌套计算 bug
+            def get_color(cost):
+                if pd.isna(cost): return '#808080'
+                if cost <= 65: return '#28a745'   # 绿色：欧皇
+                elif cost <= 73: return '#ffc107' # 黄色：亚洲人
+                else: return '#dc3545'            # 红色：非酋
+                
+            up_df['柱子颜色'] = up_df['实际花费'].apply(get_color)
+            
+            # 使用 Altair 构建图表
             chart = alt.Chart(up_df).mark_bar(cornerRadiusEnd=4, height=20).encode(
-                x=alt.X('实际花费:Q', title='花费抽数 (含垫刀)', scale=alt.Scale(domain=[0, 160])), # 大保底最高可达160
-                y=alt.Y('展示名:N', title='', sort=alt.EncodingSortField(field="获取序号", order="ascending")), # 按获得顺序排列
-                color=alt.condition(
-                    alt.datum['实际花费'] <= 65,
-                    alt.value('#28a745'),  # 绿色：欧皇区 (<=65)
-                    alt.condition(
-                        alt.datum['实际花费'] <= 73,
-                        alt.value('#ffc107'),  # 黄色：亚洲人区 (66-73)
-                        alt.value('#dc3545')   # 红色：非酋区 (>=74)
-                    )
-                ),
+                x=alt.X('实际花费:Q', title='花费抽数 (含垫刀)', scale=alt.Scale(domain=[0, 160])),
+                y=alt.Y('展示名:N', title='', sort=alt.EncodingSortField(field="获取序号", order="ascending")),
+                # 直接读取算好的颜色列 (scale=None 告诉它直接用色值，不要自己去映射)
+                color=alt.Color('柱子颜色:N', scale=None),
                 tooltip=[
                     alt.Tooltip('角色名', title='角色'),
                     alt.Tooltip('实际花费', title='实际花费抽数'),
                     alt.Tooltip('保底类型', title='抽取情况')
                 ]
             ).properties(
-                height=max(200, len(up_df) * 45) # 图表高度自适应角色数量
+                height=max(200, len(up_df) * 45) # 图表高度自适应
             ).configure_axis(
                 labelFontSize=13,
                 titleFontSize=14
@@ -284,6 +286,3 @@ if not edited_df.empty and not edited_df['角色名'].isna().all():
         else:
             st.info("尚未获取UP角色，无法生成可视化图鉴。")
         # ======================================================
-
-        st.write("#### 📜 详细分析日志")
-        st.dataframe(res_df, use_container_width=True)
