@@ -116,7 +116,7 @@ if 'raw_data' not in st.session_state:
 
 # --- 侧边栏 ---
 with st.sidebar:
-    st.header("🔗 第一步：增量抓取")
+    st.header("🔗 增量抓取")
     api_url = st.text_input("粘贴 URL 同步近6个月数据:")
     if st.button("🚀 抓取并与当前数据合并"):
         if api_url:
@@ -132,7 +132,7 @@ with st.sidebar:
             st.warning("请先粘贴 URL。")
 
     st.markdown("---")
-    st.header("📁 第二步：历史导入")
+    st.header("📁 历史导入")
     uploaded_file = st.file_uploader("导入本地备份 (.xlsx / .csv)", type=["xlsx", "csv"])
     if uploaded_file is not None:
         try:
@@ -151,7 +151,7 @@ with st.sidebar:
             st.error(f"文件读取失败: {e}")
 
     st.markdown("---")
-    st.header("💾 第三步：导出备份")
+    st.header("💾 导出备份")
     if not st.session_state.raw_data.empty:
         # 生成 Excel 文件流
         output = io.BytesIO()
