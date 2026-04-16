@@ -4,10 +4,9 @@ import io
 import requests
 import time
 import altair as alt # 新增：引入强大的高级图表库
+import urllib.parse # 添加在文件最顶部的 import 区域
 
 st.set_page_config(page_title="鸣潮抽卡分析站 | 可视化版", layout="wide")
-
-import urllib.parse # 添加在文件最顶部的 import 区域
 
 def fetch_kuro_data(url):
     """自动解析前端 URL 并请求库洛后端 API"""
