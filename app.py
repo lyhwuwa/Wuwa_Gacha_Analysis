@@ -215,4 +215,30 @@ if not edited_df.empty and not edited_df['角色名'].isna().all():
                     alt.value('#28a745'),  # 绿色：欧皇区 (<=65)
                     alt.condition(
                         alt.datum['实际花费'] <= 73,
-                        alt.value('#ffc107'),  # 黄色：亚洲人
+                        alt.value('#ffc107'),  # 黄色：亚洲人区 (66-73)
+                        alt.value('#dc3545')   # 红色：非酋区 (>=74)
+                    )
+                ),
+                tooltip=[
+                    alt.Tooltip('角色名', title='角色'),
+                    alt.Tooltip('实际花费', title='实际花费抽数'),
+                    alt.Tooltip('保底类型', title='抽取情况')
+                ]
+            ).properties(
+                height=max(200, len(up_df) * 45) # 图表高度自适应角色数量
+            ).configure_axis(
+                labelFontSize=13,
+                titleFontSize=14
+            )
+            
+            # 渲染图表
+            st.altair_chart(chart, use_container_width=True)
+            
+            # 图表图例说明
+            st.caption("🟢 **欧皇**：≤ 65 抽 | 🟡 **平庸**：66 - 73 抽 | 🔴 **非酋**：≥ 74 抽 （*注：大保底花费可能超过80抽*）")
+        else:
+            st.info("尚未获取UP角色，无法生成可视化图鉴。")
+        # ======================================================
+
+        st.write("#### 📜 详细分析日志")
+        st.dataframe(res_df, use_container_width=True)
