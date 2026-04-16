@@ -7,55 +7,72 @@ import altair as alt # 新增：引入强大的高级图表库
 
 st.set_page_config(page_title="鸣潮抽卡分析站 | 可视化版", layout="wide")
 
+import urllib.parse # 添加在文件最顶部的 import 区域
+
 def fetch_kuro_data(url):
-    """带反爬伪装和精确错误提示的抓取函数"""
-    # 增加 User-Agent 伪装成真实的电脑浏览器，防止被服务器拦截
+    """自动解析前端 URL 并请求库洛后端 API"""
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    payload = {"cardPoolId": "", "cardPoolType": 1, "languageCode": "zh-Hans", "recordId": ""}
+    
+    # 1. 拦截错误输入
+    if "?" not in url:
+        return None, "抓取失败：这不是一个有效的带参数的抽卡链接。"
+        
+    # 2. 核心戏法：从你的网页 URL 中拆解出所有的身份令牌
+    try:
+        # 分离出问号后面的参数部分
+        query_string = url.split("?")[1]
+        # 将参数解析为字典
+        params_dict = urllib.parse.parse_qs(query_string)
+        # 将列表值转换为普通字典
+        payload = {k: v[0] for k, v in params_dict.items()}
+    except Exception as e:
+        return None, f"URL 解析失败: {str(e)}"
+
+    # 3. 锁定目标：强制查询 1 号池（角色限定唤取）
+    payload["cardPoolType"] = 1
+    
+    # 4. 智能路由：判断是国服还是国际服
+    # 国服 API 通常是 aki-game2.com，外服通常是 .net
+    api_endpoint = "https://gmserver-api.aki-game2.com/gacha/record/query"
+    if "global" in payload.get("serverId", "").lower() or ".net" in url:
+        api_endpoint = "https://gmserver-api.aki-game2.net/gacha/record/query"
+
     all_pulls = []
     
-    # 基础格式校验
-    if not url.startswith("http"):
-        return None, "抓取失败: 请粘贴完整的 URL 链接（必须以 http 开头）。"
-    
+    # 5. 开始向真正的后端接口请求数据
     try:
         while True:
-            response = requests.post(url, json=payload, headers=headers)
+            response = requests.post(api_endpoint, json=payload, headers=headers)
             
-            # 1. 检查服务器是否直接拒绝访问 (比如 403, 404, 500)
             if response.status_code != 200:
-                return None, f"抓取失败: 服务器拒绝访问 (状态码 {response.status_code})。大概率链接已过期，请回游戏重新提取。"
-            
-            # 2. 尝试解析数据，捕获你遇到的那个 JSON 报错
-            try:
-                res = response.json()
-            except ValueError:
-                return None, "抓取失败: 服务器返回了无效数据（非JSON）。链接已失效或请求被拦截，请回游戏刷新记录并重新获取 URL。"
-            
-            # 3. 检查游戏服务器自带的错误码
-            if res.get("code") != 0:
-                error_msg = res.get("message", "未知错误")
-                return None, f"抓取失败: 官方服务器提示 - {error_msg}。"
+                return None, f"请求被官方服务器拒绝 (HTTP {response.status_code})。请确认链接未过期。"
                 
-            if not res.get("data"): 
-                break # 数据抓完了
+            res = response.json()
+            
+            # 检查官方接口返回的错误码
+            if res.get("code") != 0:
+                return None, f"官方服务器提示: {res.get('message', '未知错误(大概率链接已过期)')}"
+                
+            if not res.get("data"):
+                break # 这一页没数据了，说明抓取完毕
                 
             data_list = res["data"]
             all_pulls.extend(data_list)
-            payload["recordId"] = data_list[-1]["id"]
-            time.sleep(0.3)
             
-    except requests.exceptions.RequestException as e:
-        return None, f"网络请求失败，请检查网络连接: {str(e)}"
+            # 把记录翻页指针更新为当前页最后一条的ID，准备抓下一页
+            payload["recordId"] = data_list[-1]["id"]
+            time.sleep(0.3) # 停顿防封
+            
     except Exception as e:
-        return None, f"发生未知错误: {str(e)}"
+        return None, f"网络请求异常: {str(e)}"
         
-    if not all_pulls: 
-        return None, "未获取到任何抽卡数据，请确认你在这个池子里有抽卡记录。"
+    if not all_pulls:
+        return None, "未获取到数据，可能是这个池子你还没有抽过卡。"
         
+    # 官方数据是从新到旧，为了算垫刀，反转成从旧到新
     all_pulls.reverse()
     standard_5_stars = ["凌阳", "鉴心", "卡卡罗", "维里奈", "安可"]
     
@@ -75,7 +92,6 @@ def fetch_kuro_data(url):
             pull_counter = 0 
             
     return pd.DataFrame(parsed_data), "success"
-
 def merge_records(old_df, new_df):
     if old_df.empty: return new_df
     if new_df.empty: return old_df
