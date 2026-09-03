@@ -42,8 +42,43 @@ st.markdown("""
         border-right: 1px solid var(--ww-line);
     }
     [data-testid="stSidebar"] > div:first-child { padding-top: 1rem; }
+    [data-testid="stSidebar"] h3 {
+        color: #dce8eb !important;
+        font-size: 1.32rem;
+        font-weight: 700;
+        letter-spacing: .035em;
+        text-shadow: 0 0 16px rgba(112, 226, 231, .10);
+    }
     [data-testid="stSidebar"] h2 {
-        color: var(--ww-cyan-soft); font-size: 1rem; letter-spacing: .12em;
+        color: var(--ww-cyan-soft) !important;
+        font-size: 1.08rem;
+        font-weight: 700;
+        letter-spacing: .10em;
+        text-shadow: 0 0 12px rgba(112, 226, 231, .12);
+    }
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+        color: #94a6ae !important;
+        opacity: 1;
+        font-size: .90rem;
+        font-weight: 500;
+        line-height: 1.75;
+    }
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p,
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] span {
+        color: #94a6ae !important;
+        opacity: 1;
+    }
+    [data-testid="stSidebar"] [data-testid="stFileUploader"] label,
+    [data-testid="stSidebar"] [data-testid="stFileUploader"] label p {
+        color: #b9c6cc !important;
+        font-size: .94rem;
+        font-weight: 600;
+    }
+    [data-testid="stSidebar"] [data-testid="stFileUploaderDropzoneInstructions"] span {
+        color: #dce5e8 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stFileUploaderDropzoneInstructions"] small {
+        color: #8799a2 !important;
     }
 
     .ww-hero {
