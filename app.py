@@ -1,7 +1,11 @@
 import streamlit as st
 import pandas as pd
-import io
+import hashlib
 import altair as alt
+
+from gacha_model import MEAN_GOLD, MEAN_UP
+from record_analysis import (empty_records, normalize_records, merge_records, analyze_records, read_backup, export_backup)
+from simulation_ui import render_simulator, number, themed
 
 st.set_page_config(
     page_title="鸣潮 · 唤取终端",
@@ -13,7 +17,6 @@ st.set_page_config(
 # --- 鸣潮风格视觉主题（纯 CSS，不依赖外部素材）---
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
 
     :root {
         --ww-bg: #080b10; --ww-panel: rgba(17, 23, 31, .88);
@@ -177,229 +180,137 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def merge_records(old_df, new_df):
-    """智能合并并去重"""
-    if old_df.empty: return new_df
-    if new_df.empty: return old_df
-    for df in [old_df, new_df]:
-        if '时间' not in df.columns: df['时间'] = ""
-        df['时间'] = df['时间'].fillna("")
-    combined = pd.concat([old_df, new_df], ignore_index=True)
-    combined = combined.drop_duplicates(subset=['角色名', '抽数', '时间'], keep='last').reset_index(drop=True)
-    return combined
 
-def calculate_stats(df):
-    df_valid = df.dropna(subset=['角色名', '抽数']).copy()
-    if df_valid.empty: return pd.DataFrame(), {}
-        
-    df_valid['抽数'] = pd.to_numeric(df_valid['抽数'], errors='coerce').fillna(0).astype(int)
-    
-    analysis_data = []
-    wasted_pulls = 0
-    total_up_cost, total_up_count, win_count, win_opportunity = 0, 0, 0, 0
-    
-    for _, row in df_valid.iterrows():
-        char_name = str(row.get('角色名', '')).strip()
-        if not char_name or char_name == 'nan': continue
-        
-        is_up_raw = row.get('是否UP?', row.get('是UP?', '否'))
-        is_up = str(is_up_raw).strip() == '是'
-        pulls = int(row['抽数'])
-        time_str = row.get('时间', '')
-        
-        pity_type, current_cost = "", 0
+# Keep only committed record data in session state; the editor is applied explicitly.
+for key, value in {
+    "raw_data": empty_records(), "editor_version": 0, "upload_version": 0,
+    "tail_pity": 0, "initial_guaranteed": False, "workspace": "抽卡记录",
+    "last_import": None,
+}.items():
+    st.session_state.setdefault(key, value)
 
-        if is_up:
-            total_up_count += 1
-            if wasted_pulls > 0:
-                pity_type, current_cost = "强娶 (大保底)", pulls + wasted_pulls
-                wasted_pulls = 0
-            else:
-                pity_type, current_cost = "运气 (小保底)", pulls
-                win_count += 1
-                win_opportunity += 1
-            total_up_cost += current_cost
-        else:
-            pity_type, wasted_pulls = "歪了", wasted_pulls + pulls
-            win_opportunity += 1
-            
-        analysis_data.append({
-            "时间": time_str, "角色名": char_name, "是UP?": "是" if is_up else "否", 
-            "抽数": pulls, "保底类型": pity_type, "实际花费": current_cost if is_up else None
-        })
-    
-    stats = {
-        "总出金": len(df_valid), "UP数": total_up_count, 
-        "不歪率": f"{(win_count/win_opportunity*100):.1f}%" if win_opportunity > 0 else "0%",
-        "平均出金": round(df_valid['抽数'].mean(), 1) if not df_valid.empty else 0,
-        "UP平均花费": round(total_up_cost/total_up_count, 1) if total_up_count > 0 else 0
-    }
-    return pd.DataFrame(analysis_data), stats
 
-# --- 状态初始化 ---
-if 'raw_data' not in st.session_state:
-    st.session_state.raw_data = pd.DataFrame(columns=['时间', '角色名', '是UP?', '抽数'])
+def clear_records():
+    st.session_state.raw_data = empty_records()
+    st.session_state.editor_version += 1
+    st.session_state.upload_version += 1
+    st.session_state.last_import = None
+    st.session_state.tail_pity = 0
+    st.session_state.initial_guaranteed = False
 
-# --- 侧边栏 ---
+
+def use_history(pulls, pity, guaranteed, message):
+    st.session_state.queued_simulation = dict(pulls=pulls, pity=pity, guaranteed=guaranteed, message=message)
+    st.session_state.workspace = "概率模拟"
+
+
 with st.sidebar:
     st.markdown("### 〰 共鸣数据终端")
     st.caption("RESONANCE DATA CONSOLE / LOCAL")
     st.divider()
     st.header("01 · 记录接入")
-    st.caption("导入旧记录后，系统会自动合并并去除重复项。")
-    uploaded_file = st.file_uploader("接入本地记录 (.xlsx / .csv)", type=["xlsx", "csv"])
-    if uploaded_file is not None:
-        try:
-            if uploaded_file.name.endswith('.csv'): imported_df = pd.read_csv(uploaded_file)
-            else: imported_df = pd.read_excel(uploaded_file)
-            if '是否UP?' in imported_df.columns: imported_df = imported_df.rename(columns={'是否UP?': '是UP?'})
-            st.session_state.raw_data = merge_records(st.session_state.raw_data, imported_df)
-            st.success("记录接入成功 · 数据已完成同步")
-        except Exception as e:
-            st.error(f"文件读取失败: {e}")
+    st.caption("支持旧版 Excel / CSV。请按同一限定角色卡池的时间顺序记录，保底跨期继承。")
+    uploaded = st.file_uploader("接入本地记录 (.xlsx / .csv)", type=["xlsx", "csv"], key=f"import_{st.session_state.upload_version}")
+    if uploaded is not None:
+        fingerprint = hashlib.sha256(uploaded.getvalue()).hexdigest()
+        if fingerprint != st.session_state.last_import:
+            try:
+                imported, settings = read_backup(uploaded.getvalue(), uploaded.name)
+                was_empty = st.session_state.raw_data.empty
+                st.session_state.raw_data = merge_records(st.session_state.raw_data, imported)
+                st.session_state.editor_version += 1
+                st.session_state.last_import = fingerprint
+                if was_empty:
+                    st.session_state.update(settings)
+                elif settings:
+                    st.info("记录已合并。当前垫抽和记录起点沿用现有设置，请在下方核对。")
+                st.success("记录已接入；重复导入不会再次累加。")
+            except Exception as exc:
+                st.error(f"文件读取失败：{exc}")
+    st.header("02 · 保底状态")
+    st.number_input("当前垫抽（末尾未出金）", min_value=0, max_value=78, step=1, key="tail_pity")
+    st.checkbox("记录起点已处于大保底", key="initial_guaranteed")
+    st.caption("起点默认0垫抽、小保底。若历史不完整，请谨慎解读累计成本与分位。当前垫抽属于已经投入的抽数。")
+    st.header("03 · 记录封存")
+    if not st.session_state.raw_data.empty or st.session_state.tail_pity:
+        st.download_button("↓ 封存为 Excel", export_backup(st.session_state.raw_data, st.session_state.tail_pity, st.session_state.initial_guaranteed),
+                           "鸣潮抽卡永久备份.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", key="backup_excel")
+        st.caption("Excel 同时保存原始记录、当前垫抽和记录起点状态。请应用编辑后再导出。")
+    st.button("清空当前终端", width="stretch", on_click=clear_records)
 
-    st.markdown("---")
-    st.header("02 · 记录封存")
-    st.caption("将当前唤取记录导出为 Excel，方便长期保存。")
-    if not st.session_state.raw_data.empty:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            st.session_state.raw_data.to_excel(writer, index=False, sheet_name='抽卡记录')
-        excel_data = output.getvalue()
-        
-        st.download_button(
-            label="↓ 封存为 Excel",
-            data=excel_data,
-            file_name="鸣潮抽卡永久备份.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary"
-        )
-    
-    if st.button("清空当前终端", width="stretch"):
-        st.session_state.raw_data = pd.DataFrame(columns=['时间', '角色名', '是UP?', '抽数'])
-        st.rerun()
-
-# --- 主界面 ---
 st.markdown("""
 <div class="ww-hero">
     <div class="ww-eyebrow">Wuthering Waves · Convene Archive</div>
     <div class="ww-title">唤取<span>终端</span></div>
-    <div class="ww-subtitle">共鸣者唤取记录 / 概率轨迹 / 欧非分析</div>
+    <div class="ww-subtitle">真实记录 / 概率模拟 / 同预算对比</div>
     <div class="ww-status">本地解析核心 ONLINE</div>
 </div>
 """, unsafe_allow_html=True)
+st.radio("工作区", ["抽卡记录", "概率模拟"], horizontal=True, key="workspace", label_visibility="collapsed")
+res_df, metrics = analyze_records(st.session_state.raw_data, int(st.session_state.tail_pity), st.session_state.initial_guaranteed)
 
-st.info("**终端指引**　直接在下方新增唤取记录，或从左侧接入已有 Excel / CSV。所有统计均在当前会话中完成。")
-st.markdown('<div class="ww-section">唤取记录录入 <small>CONVENE LOG INPUT</small></div>', unsafe_allow_html=True)
-
-edited_df = st.data_editor(
-    st.session_state.raw_data,
-    num_rows="dynamic",
-    width="stretch",
-    column_config={
-        "时间": st.column_config.TextColumn("记录时间（可选）"),
-        "角色名": st.column_config.TextColumn("共鸣者", required=True),
-        "是UP?": st.column_config.SelectboxColumn("限定共鸣者？", options=["是", "否"], required=True),
-        "抽数": st.column_config.NumberColumn("唤取次数", min_value=1, max_value=80, required=True, format="%d")
-    },
-    key="data_editor",
-    height=250
-)
-st.session_state.raw_data = edited_df
-
-st.divider()
-
-if not edited_df.empty and not edited_df['角色名'].isna().all():
-    res_df, m = calculate_stats(edited_df)
-    if m:
-        st.markdown('<div class="ww-section">数据概览 <small>RESONANCE OVERVIEW</small></div>', unsafe_allow_html=True)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("五星共鸣者", m["总出金"])
-        c2.metric("小保底不歪率", m["不歪率"])
-        c3.metric("平均出金", f'{m["平均出金"]} 抽')
-        
-        cost = m["UP平均花费"]
-        delta_color = "normal"
-        if cost <= 65: delta_color = "off"
-        elif cost >= 74: delta_color = "inverse"
-        c4.metric("限定平均成本", f"{cost} 抽", delta_color=delta_color)
-        
-        st.divider()
-        
-        # ================= 可视化图表区 =================
-        st.markdown('<div class="ww-section">限定共鸣者成本轨迹 <small>CONVENE COST TRACE</small></div>', unsafe_allow_html=True)
-        
-        up_df = res_df[res_df['是UP?'] == '是'].copy()
-        
-        if not up_df.empty:
-            up_df['获取序号'] = range(1, len(up_df) + 1)
-            up_df['展示名'] = up_df['获取序号'].astype(str) + ". " + up_df['角色名']
-            
-            def get_color(cost):
-                if pd.isna(cost): return '#66727c'
-                if cost <= 65: return '#67e5be'
-                elif cost <= 73: return '#e7c675'
-                else: return '#ff7882'
-                
-            up_df['柱子颜色'] = up_df['实际花费'].apply(get_color)
-            
-            base = alt.Chart(up_df).encode(
-                x=alt.X(
-                    '实际花费:Q', title='实际唤取次数（含大保底前的歪）',
-                    scale=alt.Scale(domain=[0, 160]),
-                    axis=alt.Axis(grid=True, gridColor='#22313a', tickColor='#40525c', domain=False)
-                ),
-                y=alt.Y(
-                    '展示名:N', title='',
-                    sort=alt.EncodingSortField(field="获取序号", order="ascending"),
-                    axis=alt.Axis(domain=False, ticks=False, labelPadding=10)
-                )
-            )
-
-            bars = base.mark_bar(cornerRadiusEnd=3, height=18).encode(
-                color=alt.Color('柱子颜色:N', scale=None),
-                tooltip=[
-                    alt.Tooltip('角色名', title='共鸣者'),
-                    alt.Tooltip('实际花费', title='实际成本'),
-                    alt.Tooltip('保底类型', title='唤取结果')
-                ]
-            )
-
-            labels = base.mark_text(
-                align='left', baseline='middle', dx=7,
-                color='#dcecef', fontSize=12, fontWeight=600
-            ).encode(text=alt.Text('实际花费:Q', format='.0f'))
-
-            chart = (bars + labels).properties(
-                height=max(200, len(up_df) * 45)
-            ).configure_axis(
-                labelColor='#b8c5cb', titleColor='#72838c',
-                labelFontSize=12, titleFontSize=12
-            ).configure_view(
-                stroke=None
-            ).configure(
-                background='transparent'
-            )
-            
-            st.altair_chart(chart, width="stretch")
-            st.markdown("""
-            <div class="ww-legend">
-                <span class="ww-chip ww-green"><b>◆</b>声频契合 ≤ 65 抽</span>
-                <span class="ww-chip ww-gold"><b>◆</b>标准区间 66–73 抽</span>
-                <span class="ww-chip ww-red"><b>◆</b>高耗共鸣 ≥ 74 抽</span>
-            </div>
-            """, unsafe_allow_html=True)
-            st.caption("大保底成本会计入此前歪出的抽数，因此可能超过 80 抽。")
-        else:
-            st.info("暂未检测到限定共鸣者记录，成本轨迹等待同步。")
-        # ======================================================
-
-        st.markdown('<div class="ww-section">详细解析日志 <small>ANALYSIS ARCHIVE</small></div>', unsafe_allow_html=True)
-        st.dataframe(res_df, width="stretch")
+if st.session_state.workspace == "概率模拟":
+    render_simulator(metrics)
 else:
-    st.markdown("""
-    <div style="padding:42px 20px;text-align:center;border:1px dashed rgba(112,226,231,.16);border-radius:3px 14px 3px 14px;color:#667782;background:rgba(112,226,231,.018)">
-        <div style="font-size:28px;color:rgba(112,226,231,.32);margin-bottom:8px">〰 ◇ 〰</div>
-        等待首条唤取记录接入
-    </div>
-    """, unsafe_allow_html=True)
+    st.info("**终端指引**　每行是一条出金记录，抽数是距上次出金的间隔（跨卡池继承的垫抽也计入）。按从早到晚排列，修改后点击“应用记录并更新统计”。")
+    st.markdown('<div class="ww-section">唤取记录录入 <small>CONVENE LOG INPUT</small></div>', unsafe_allow_html=True)
+    with st.form("record_editor_form"):
+        edited = st.data_editor(
+            st.session_state.raw_data, num_rows="dynamic", width="stretch", hide_index=True,
+            column_order=["时间", "角色名", "是UP?", "抽数"],
+            column_config={
+                "时间": st.column_config.TextColumn("记录时间（可选）"),
+                "角色名": st.column_config.TextColumn("共鸣者", required=True),
+                "是UP?": st.column_config.SelectboxColumn("限定共鸣者？", options=["是", "否"], required=True),
+                "抽数": st.column_config.NumberColumn("唤取次数", min_value=1, max_value=80, step=1, required=True, format="%d"),
+            }, key=f"record_editor_{st.session_state.editor_version}", height=250)
+        if st.form_submit_button("应用记录并更新统计", type="primary"):
+            st.session_state.raw_data = normalize_records(edited)
+            st.session_state.editor_version += 1
+            st.rerun()
+    for warning in metrics["问题"]:
+        st.warning(warning)
+    if metrics["总出金"] or metrics["当前垫抽"]:
+        st.markdown('<div class="ww-section">数据概览 <small>RESONANCE OVERVIEW</small></div>', unsafe_allow_html=True)
+        a, b, c, d = st.columns(4)
+        a.metric("五星共鸣者", metrics["总出金"])
+        b.metric("限定UP数", metrics["UP数"])
+        c.metric("小保底不歪率", f'{metrics["不歪率"]:.1%}' if metrics["不歪率"] is not None else "—")
+        d.metric("平均出金间隔", f'{number(metrics["平均出金"], 1)} 抽')
+        a, b, c, d = st.columns(4)
+        a.metric("累计实际投入", f'{metrics["总投入"]:,} 抽')
+        b.metric("已完成UP平均成本", f'{number(metrics["UP平均花费"], 1)} 抽')
+        c.metric("总投入÷UP数", f'{number(metrics["预算每UP"], 1)} 抽')
+        d.metric("尚未完成的UP投入", f'{metrics["未完成UP投入"]} 抽')
+        st.caption(f'完整UP周期包含此前的歪；末尾未出UP的投入另列，包含未完成周期中的非UP金及当前垫抽。模型长期参考：每金{MEAN_GOLD:.2f}抽，每UP {MEAN_UP:.2f}抽。')
+        st.caption(f'下一次出金：{"必定为UP（大保底）" if metrics["下次大保底"] else "50/50（小保底）"}。')
+        a, b = st.columns(2)
+        a.button("用我的总抽数对比模拟", type="primary", disabled=not metrics["可对比"], width="stretch",
+                 on_click=use_history, kwargs=dict(pulls=max(1, metrics["总投入"]), pity=0, guaranteed=metrics["起始大保底"],
+                                                   message="已载入记录总投入；下方将叠加真实UP数和出金数。"))
+        b.button("从当前保底状态继续模拟", disabled=bool(metrics["问题"]), width="stretch",
+                 on_click=use_history, kwargs=dict(pulls=1700, pity=metrics["当前垫抽"], guaranteed=metrics["下次大保底"],
+                                                   message="已载入当前垫抽和大小保底。这里的抽数是未来新增投入，可自行调整。"))
+        if metrics["总投入"] > 100000:
+            st.caption("当前模型单次最多计算100,000抽；历史记录统计不受此限。")
+        up_df = res_df[res_df["是UP?"] == "是"].copy()
+        st.markdown('<div class="ww-section">限定共鸣者成本轨迹 <small>CONVENE COST TRACE</small></div>', unsafe_allow_html=True)
+        if not up_df.empty:
+            up_df["获取序号"] = range(1, len(up_df) + 1)
+            up_df["展示名"] = up_df["获取序号"].astype(str) + ". " + up_df["角色名"]
+            up_df["柱子颜色"] = up_df["实际花费"].map(lambda cost: "#67e5be" if cost <= 65 else "#e7c675" if cost <= 73 else "#ff7882")
+            base = alt.Chart(up_df).encode(
+                x=alt.X("实际花费:Q", title="完整UP周期投入（含此前的歪）", scale=alt.Scale(domain=[0, max(160, float(up_df["实际花费"].max()) + 10)])),
+                y=alt.Y("展示名:N", title="", sort=alt.EncodingSortField(field="获取序号", order="ascending")))
+            bars = base.mark_bar(cornerRadiusEnd=3, height=18).encode(color=alt.Color("柱子颜色:N", scale=None), tooltip=["角色名:N", "实际花费:Q", "保底类型:N"])
+            labels = base.mark_text(align="left", baseline="middle", dx=7, color="#dcecef").encode(text=alt.Text("实际花费:Q", format=".0f"))
+            reference = alt.Chart(pd.DataFrame({"长期均值": [MEAN_UP]})).mark_rule(color="#70e2e7", strokeDash=[4, 4]).encode(x="长期均值:Q", tooltip=alt.Tooltip("长期均值:Q", format=".2f"))
+            st.altair_chart(themed((bars + labels + reference).properties(height=max(200, len(up_df) * 40))), width="stretch")
+            st.caption("颜色沿用原成本分段：≤65抽、66–73抽、≥74抽；虚线为模型长期每UP均值81.15抽。颜色不是统计显著性的判断。")
+        else:
+            st.info("尚未获得UP；未完成周期的投入继续累计，不会记成0抽/UP。")
+        st.markdown('<div class="ww-section">详细解析日志 <small>ANALYSIS ARCHIVE</small></div>', unsafe_allow_html=True)
+        st.dataframe(res_df, width="stretch", hide_index=True)
+        st.download_button("导出详细解析 CSV", res_df.to_csv(index=False).encode("utf-8-sig"), "鸣潮抽卡解析.csv", "text/csv")
+    else:
+        st.markdown("""<div style="padding:36px 20px;text-align:center;border:1px dashed rgba(112,226,231,.16);border-radius:3px 14px;color:#8e9ba7">等待首条唤取记录接入；也可以切换到“概率模拟”直接体验1700抽。</div>""", unsafe_allow_html=True)
